@@ -5,58 +5,18 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+  packages: write
+
+env:
+  UPSTREAM_URL: https://github.com/devnen/Chatterbox-TTS-Server.git
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
 jobs:
-  sync:
-    name: Sync upstream
+  build-and-push:
     runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.check.outputs.changed }}
-      version: ${{ steps.check.outputs.version }}
-    steps:
-      - name: VÃ©rifier si upstream a changÃ©
-        id: check
-        run: |
-          UPSTREAM_SHA=$(git ls-remote https://github.com/devnen/Chatterbox-TTS-Server.git HEAD | cut -f1)
-          
-          # Lire le SHA stockÃ© dans mon repo
-          LOCAL_SHA=$(curl -sf \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://raw.githubusercontent.com/${{ github.repository }}/main/.upstream-sha" \
-            || echo "")
 
-          VERSION=$(git ls-remote --tags https://github.com/devnen/Chatterbox-TTS-Server.git \
-            | grep -v '{}' | awk '{print $2}' | sed 's|refs/tags/||' \
-            | sort -V | tail -1)
-
-          echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
-
-          if [ "$LOCAL_SHA" = "$UPSTREAM_SHA" ]; then
-            echo "Pas de changement."
-            echo "changed=false" >> $GITHUB_OUTPUT
-          else
-            echo "Nouveau commit dÃ©tectÃ©."
-            echo "changed=true" >> $GITHUB_OUTPUT
-
-            # Clone upstream et push dans mon repo
-            git clone https://github.com/devnen/Chatterbox-TTS-Server.git sources
-            cd sources
-            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-            echo "$UPSTREAM_SHA" > .upstream-sha
-            git add .upstream-sha
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git commit -m "sync: upstream $UPSTREAM_SHA"
-            git push origin HEAD:main --force
-          fi
-
-  build:
-    name: Build ${{ matrix.variant }}
-    needs: sync
-    if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -67,22 +27,64 @@ jobs:
             dockerfile: Dockerfile.strixhalo
 
     steps:
-      - name: Checkout mon repo
-        uses: actions/checkout@v4
-        with:
-          ref: main
+      # Ã‰tape 1 : VÃ©rifier si upstream a changÃ©
+      - name: Check upstream SHA
+        id: check
+        run: |
+          UPSTREAM_SHA=$(git ls-remote ${{ env.UPSTREAM_URL }} HEAD | cut -f1)
+          LOCAL_SHA=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://raw.githubusercontent.com/${{ github.repository }}/main/.upstream-sha" \
+            || echo "")
+          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+          if [ "$LOCAL_SHA" = "$UPSTREAM_SHA" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
 
+      # Ã‰tape 2 : Cloner upstream si changement
+      - name: Clone upstream
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git clone ${{ env.UPSTREAM_URL }} .
+
+      # Ã‰tape 3 : VÃ©rifier que le Dockerfile existe
+      - name: Check for Dockerfile
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          echo "Fichiers prÃ©sents :"
+          ls -la
+          if [ ! -f ${{ matrix.dockerfile }} ]; then
+            echo "Erreur : ${{ matrix.dockerfile }} introuvable."
+            exit 1
+          fi
+
+      # Ã‰tape 4 : RÃ©cupÃ©rer la derniÃ¨re version
+      - name: Get latest version
+        if: steps.check.outputs.changed == 'true'
+        id: version
+        run: |
+          VERSION=$(git tag --sort=-version:refname | head -1)
+          echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
+
+      # Ã‰tape 5 : Configurer Docker Buildx
       - name: Set up Docker Buildx
+        if: steps.check.outputs.changed == 'true'
         uses: docker/setup-buildx-action@v3
 
+      # Ã‰tape 6 : Connexion Ã  GHCR
       - name: Login to GHCR
+        if: steps.check.outputs.changed == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Ã‰tape 7 : Build et push
       - name: Build and push
+        if: steps.check.outputs.changed == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -90,7 +92,21 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ghcr.io/${{ github.repository }}:${{ matrix.variant }}-${{ needs.sync.outputs.version }}
-            ghcr.io/${{ github.repository }}:${{ matrix.variant }}-latest
+            ${{ env.IMAGE_NAME }}:${{ matrix.variant }}-${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ matrix.variant }}-latest
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+      # Ã‰tape 8 : Sauvegarder le SHA upstream dans mon repo
+      - name: Save upstream SHA
+        if: steps.check.outputs.changed == 'true' && matrix.variant == 'rocm'
+        run: |
+          cd /tmp
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git myrepo
+          cd myrepo
+          echo "${{ steps.check.outputs.upstream_sha }}" > .upstream-sha
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .upstream-sha
+          git commit -m "sync: upstream ${{ steps.check.outputs.upstream_sha }}"
+          git push origin main
