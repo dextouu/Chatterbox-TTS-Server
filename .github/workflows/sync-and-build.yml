@@ -2,18 +2,18 @@ name: Sync upstream & Build Docker
 
 on:
   schedule:
-    # Vérification toutes les 6h
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
   sync:
-    name: Sync upstream sources
+    name: Sync upstream
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.sync.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout fork
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -23,31 +23,49 @@ jobs:
         id: sync
         run: |
           git remote add upstream https://github.com/devnen/Chatterbox-TTS-Server.git || true
-          git fetch upstream
+          git fetch upstream --tags
 
-          LOCAL=$(git rev-parse HEAD)
           UPSTREAM=$(git rev-parse upstream/main)
 
+          if git show-ref --verify --quiet refs/heads/main; then
+            LOCAL=$(git rev-parse HEAD)
+          else
+            LOCAL=""
+          fi
+
           if [ "$LOCAL" = "$UPSTREAM" ]; then
-            echo "No changes from upstream."
+            echo "No changes."
             echo "changed=false" >> $GITHUB_OUTPUT
           else
-            echo "Upstream has new commits — merging."
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git merge upstream/main --no-edit
-            git push origin main
+            git reset --hard upstream/main
+            git push origin main --force --tags
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: Get latest upstream version
+        id: version
+        run: |
+          VERSION=$(git tag --sort=-version:refname | head -1)
+          echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
+
   build:
-    name: Build & push Docker image
+    name: Build ${{ matrix.variant }}
     needs: sync
     if: needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: rocm
+            dockerfile: Dockerfile.rocm
+          - variant: strixhalo
+            dockerfile: Dockerfile.strixhalo
 
     steps:
       - name: Checkout
@@ -65,23 +83,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=latest
-            type=sha,prefix=sha-
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: true
-          # Retire linux/arm64 si tu n'as pas besoin de ARM
           platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ matrix.variant }}-${{ needs.sync.outputs.version }}
+            ghcr.io/${{ github.repository }}:${{ matrix.variant }}-latest
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
