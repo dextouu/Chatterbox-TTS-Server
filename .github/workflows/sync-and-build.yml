@@ -10,45 +10,44 @@ jobs:
     name: Sync upstream
     runs-on: ubuntu-latest
     outputs:
-      changed: ${{ steps.sync.outputs.changed }}
-      version: ${{ steps.version.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Sync from upstream
-        id: sync
+      - name: VÃ©rifier si upstream a changÃ©
+        id: check
         run: |
-          git remote add upstream https://github.com/devnen/Chatterbox-TTS-Server.git || true
-          git fetch upstream --tags
+          UPSTREAM_SHA=$(git ls-remote https://github.com/devnen/Chatterbox-TTS-Server.git HEAD | cut -f1)
+          
+          # Lire le SHA stockÃ© dans mon repo
+          LOCAL_SHA=$(curl -sf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://raw.githubusercontent.com/${{ github.repository }}/main/.upstream-sha" \
+            || echo "")
 
-          UPSTREAM=$(git rev-parse upstream/main)
+          VERSION=$(git ls-remote --tags https://github.com/devnen/Chatterbox-TTS-Server.git \
+            | grep -v '{}' | awk '{print $2}' | sed 's|refs/tags/||' \
+            | sort -V | tail -1)
 
-          if git show-ref --verify --quiet refs/heads/main; then
-            LOCAL=$(git rev-parse HEAD)
-          else
-            LOCAL=""
-          fi
+          echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
 
-          if [ "$LOCAL" = "$UPSTREAM" ]; then
-            echo "No changes."
+          if [ "$LOCAL_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "Pas de changement."
             echo "changed=false" >> $GITHUB_OUTPUT
           else
+            echo "Nouveau commit dÃ©tectÃ©."
+            echo "changed=true" >> $GITHUB_OUTPUT
+
+            # Clone upstream et push dans mon repo
+            git clone https://github.com/devnen/Chatterbox-TTS-Server.git sources
+            cd sources
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            echo "$UPSTREAM_SHA" > .upstream-sha
+            git add .upstream-sha
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git reset --hard upstream/main
-            git push origin main --force --tags
-            echo "changed=true" >> $GITHUB_OUTPUT
+            git commit -m "sync: upstream $UPSTREAM_SHA"
+            git push origin HEAD:main --force
           fi
-
-      - name: Get latest upstream version
-        id: version
-        run: |
-          VERSION=$(git tag --sort=-version:refname | head -1)
-          echo "version=${VERSION:-latest}" >> $GITHUB_OUTPUT
 
   build:
     name: Build ${{ matrix.variant }}
@@ -68,7 +67,7 @@ jobs:
             dockerfile: Dockerfile.strixhalo
 
     steps:
-      - name: Checkout
+      - name: Checkout mon repo
         uses: actions/checkout@v4
         with:
           ref: main
