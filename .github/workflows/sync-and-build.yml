@@ -11,7 +11,7 @@ permissions:
 
 env:
   UPSTREAM_URL: https://github.com/devnen/Chatterbox-TTS-Server.git
-  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/chatterbox-tts-server
 
 jobs:
   build-and-push:
